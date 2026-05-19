@@ -31,7 +31,7 @@ struct Args {
 
     /// The layout of the containers. This should be a string representation of
     /// the container structure, for example:
-    ///   t(h(30%:v({ranger}, {"tig -w"}), 20%:{}, 50%:v({vim}, {opencode})))
+    ///   t(h(v(30%:{ranger}, {"tig -w"}), 30%:{}), h({vim}, {opencode}))
     layout: Layout
 }
 
