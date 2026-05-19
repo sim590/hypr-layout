@@ -1,6 +1,7 @@
 
 mod ast;
 mod layout;
+mod builder;
 
 use std::env;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use std::sync::LazyLock;
 use clap::Parser;
 
 use crate::ast::Layout;
+use crate::builder::build;
 
 // Récupérer la variable d'environnement $HOME
 static HOME_DIR: LazyLock<String> = LazyLock::new(|| {
@@ -37,7 +39,6 @@ fn main() {
     let args = Args::parse();
     let cwd  = args.cwd.unwrap_or_else(|| PathBuf::from(HOME_DIR.as_str()));
 
-    println!("Terminal emulator: {}", args.terminal);
-    println!("Working directory: {:?}", cwd);
+    build(&args.layout, &args.terminal, &cwd).expect("Failed to build layout!");
 }
 
