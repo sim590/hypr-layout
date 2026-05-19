@@ -6,8 +6,10 @@ mod builder;
 use std::env;
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::process::Command;
 
 use clap::Parser;
+use clap::error::ErrorKind;
 
 use crate::ast::Layout;
 use crate::builder::build;
@@ -17,6 +19,10 @@ static HOME_DIR: LazyLock<String> = LazyLock::new(|| {
     env::var("HOME").expect("Failed to get HOME environment variable")
 });
 
+fn notify_error(msg: &str) {
+    let _ = Command::new("hyprctl").args(["notify", "3", "7000", "rgb(ff3333)", &format!("fontsize:14 {msg}")])
+                                   .status();
+}
 
 #[derive(Parser)]
 struct Args {
@@ -36,9 +42,22 @@ struct Args {
 }
 
 fn main() {
-    let args = Args::parse();
-    let cwd  = args.cwd.unwrap_or_else(|| PathBuf::from(HOME_DIR.as_str()));
+    let args = Args::try_parse().unwrap_or_else(|e| {
+        e.print().unwrap();
 
-    build(&args.layout, &args.terminal, &cwd).expect("Failed to build layout!");
+        if !matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+            notify_error(&e.to_string());
+        }
+        std::process::exit(e.exit_code());
+    });
+
+    let cwd = args.cwd.unwrap_or_else(|| PathBuf::from(HOME_DIR.as_str()));
+
+    if let Err(e) = build(&args.layout, &args.terminal, &cwd) {
+        let msg = format!("hypr-layout: {e:#}");
+        eprintln!("{msg}");
+        notify_error(&msg);
+        std::process::exit(1);
+    }
 }
 
