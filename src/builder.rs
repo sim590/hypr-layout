@@ -69,7 +69,7 @@ fn launch_first_leaf(node: &Layout, terminal: &str, cwd: &Path) -> Result<String
         Layout::Leaf { command, terminal: is_terminal } => {
             let cmd = match (is_terminal, command.as_deref()) {
                 (false, Some(c)) => c.to_string(),
-                (true,  Some(c)) => format!("{terminal} --working-directory {} -e \"{c}\"", cwd.display()),
+                (true,  Some(c)) => format!("{terminal} --working-directory {} -e {c}", cwd.display()),
                 (true,  None)    => format!("{terminal} --working-directory {}", cwd.display()),
                 (_,     None)    => anyhow::bail!("Leaf node has no command to execute!"),
             };
