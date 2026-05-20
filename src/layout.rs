@@ -107,21 +107,38 @@ fn parse_leaf(input: &str) -> Result<(&str, Layout)> {
     let is_braced      = trimmed_in.starts_with('{');
     let command_offset = if is_braced { 1 } else { 0 };
     let command        = trimmed_in[command_offset..end_of_command_pos].trim().to_string();
-    let leaf           = Layout::Leaf { command: (!command.is_empty()).then_some(command), terminal: is_braced };
+
+    // Check for ratios in the command. This is to prevent waiting on timeout if the user
+    // accidentally writes something like "{30%:vim}" when he really meant "30%:{vim}".
+    let misplaced_ratio = detect_ratio(&command);
+    match misplaced_ratio {
+        Ok((_, Some(_))) => {
+            let (r, c) = command.split_once(':').unwrap();
+            anyhow::bail!("Ratios for terminal commands must prefix braces {{...}}. Perhaps you meant {r}:{{{c}}}")
+        },
+        _ => {}
+    }
+
+    let leaf = Layout::Leaf { command: (!command.is_empty()).then_some(command), terminal: is_braced };
     Ok((&trimmed_in[rest_start_pos..], leaf))
 }
 
-fn parse_ratio(input: &str) -> Result<(&str, Option<u8>)> {
+fn detect_ratio(input: &str) -> Result<(&str, Option<u8>)> {
     let leading_numbers_count = input.chars().take_while(|c| c.is_ascii_digit()).count();
     if input[leading_numbers_count..].starts_with("%:") {
         let ratio = input[..leading_numbers_count].parse::<u8>().context("Failed to parse ratio")?;
-        if ratio == 0 || ratio > 100 {
-            anyhow::bail!("Ratio must be between 1 and 100");
-        }
         Ok((&input[leading_numbers_count + 2..], Some(ratio)))
     } else {
         Ok((input, None))
     }
+}
+
+fn parse_ratio(input: &str) -> Result<(&str, Option<u8>)> {
+    let (rest, ratio_opt) = detect_ratio(input)?;
+    if let Some(r) = ratio_opt && (r == 0 || r > 100) {
+        anyhow::bail!("Ratio must be between 1 and 100");
+    }
+    Ok((rest, ratio_opt))
 }
 
 impl FromStr for Layout {
