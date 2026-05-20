@@ -2,7 +2,8 @@
 use std::path::Path;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
-use std::process::Command;
+use std::time::Duration;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
@@ -46,9 +47,9 @@ fn focus_window(addr: &str) -> Result<()> {
 // Public API
 // ---------------------------------------------------------------------------
 
-pub fn build(layout: &Layout, terminal: &str, cwd: &Path) -> Result<()> {
-    let first_addr = launch_first_leaf(layout, terminal, cwd)?;
-    build_recursive(layout, &first_addr, terminal, cwd)
+pub fn build(layout: &Layout, terminal: &str, cwd: &Path, timeout: Duration) -> Result<()> {
+    let first_addr = launch_first_leaf(layout, terminal, cwd, timeout)?;
+    build_recursive(layout, &first_addr, terminal, cwd, timeout)
 }
 
 // ---------------------------------------------------------------------------
@@ -57,53 +58,77 @@ pub fn build(layout: &Layout, terminal: &str, cwd: &Path) -> Result<()> {
 
 /// Launch the command associated with the first leaf of a node, wait for its
 /// window to appear, and return the Hyprland window address.
-fn launch_first_leaf(node: &Layout, terminal: &str, cwd: &Path) -> Result<String> {
+fn launch_first_leaf(node: &Layout, terminal: &str, cwd: &Path, timeout: Duration) -> Result<String> {
     match node {
         Layout::Split { children, .. } => {
             if let Some((_, first_child)) = children.first() {
-                launch_first_leaf(first_child, terminal, cwd)
+                launch_first_leaf(first_child, terminal, cwd, timeout)
             } else {
                 anyhow::bail!("Split node has no children");
             }
         }
         Layout::Leaf { command, terminal: is_terminal } => {
-            let cmd = match (is_terminal, command.as_deref()) {
-                (false, Some(c)) => c.to_string(),
-                (true,  Some(c)) => format!("{terminal} --working-directory {} -e {c}", cwd.display()),
-                (true,  None)    => format!("{terminal} --working-directory {}", cwd.display()),
+            let (child_process, label) = match (is_terminal, command.as_deref()) {
+                (false, Some(c)) => (Command::new("setsid").args(["sh", "-c", c]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?, c),
+                (true,  Some(c)) => (Command::new(terminal).arg("--working-directory").arg(cwd).arg("-e").args(["sh", "-c", c]).spawn()?, c),
+                (true,  None)    => (Command::new(terminal).arg("--working-directory").arg(cwd).spawn()?, terminal),
                 (_,     None)    => anyhow::bail!("Leaf node has no command to execute!"),
             };
-            dispatch(&["exec", &cmd])?;
-            wait_for_window()
+            wait_for_window(Some(child_process), timeout, label)
         }
     }
 }
 
 /// Block until a new window is opened, listening on the Hyprland event socket.
 /// Returns the window address in "0xADDRESS" format.
-fn wait_for_window() -> Result<String> {
+fn wait_for_window(mut child_process: Option<std::process::Child>, timeout: Duration, command: &str) -> Result<String> {
     let sig            = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")?;
     let xdg_runtime    = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
     let connector_path = format!("{xdg_runtime}/hypr/{sig}/.socket2.sock");
     let mut stream     = UnixStream::connect(&connector_path).context("Failed to connect to Hyprland socket")?;
-    let mut reader     = BufReader::new(&mut stream);
+
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+
+    let mut reader = BufReader::new(&mut stream);
+    let start      = std::time::Instant::now();
+
 
     loop {
         let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            anyhow::bail!("Hyprland socket closed unexpectedly");
-        } else if line.starts_with("openwindow>>") {
-            // Event format: openwindow>>ADDR,WORKSPACE,CLASS,TITLE
-            // ADDR does not carry the "0x" prefix in the event payload.
-            let addr = line
-                .trim_start_matches("openwindow>>")
-                .split(',')
-                .next()
-                .context("Failed to parse openwindow event")?
-                .trim()
-                .to_string();
-            return Ok(format!("0x{addr}"));
+
+        match reader.read_line(&mut line) {
+            Ok(0) => anyhow::bail!("Hyprland socket closed unexpectedly"),
+            Ok(_) if line.starts_with("openwindow>>") => {
+                // Event format: openwindow>>ADDR,WORKSPACE,CLASS,TITLE
+                // ADDR does not carry the "0x" prefix in the event payload.
+                let addr = line.trim_start_matches("openwindow>>")
+                               .split(',')
+                               .next()
+                               .context("Failed to parse openwindow event")?
+                               .trim()
+                               .to_string();
+                return Ok(format!("0x{addr}"));
+            },
+            Ok(_) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                   || e.kind() == std::io::ErrorKind::TimedOut => {},
+            Err(e) => return Err(e.into()),
+        }
+
+        if let Some(c) = child_process.as_mut() && let Some(status) = c.try_wait()? && !status.success() {
+            anyhow::bail!(
+                "'{command}' exited with {status} before creating a window.\n\
+                 If it is a TUI app, use '{{{command}}}' to run it inside a terminal."
+            );
+        }
+
+        if start.elapsed() > timeout {
+            anyhow::bail!(
+                "Timed out after {}s waiting for '{command}' to open a window.\n\
+                 Possible causes: the command crashed, it is a TUI app (try '{{{command}}}'),\n\
+                 or it is a singleton app that is already running.",
+                timeout.as_secs()
+            );
         }
     }
 }
@@ -130,6 +155,7 @@ fn build_recursive(
     first_leaf_addr: &str,
     terminal:        &str,
     cwd:             &Path,
+    timeout:         Duration,
 ) -> Result<()> {
     match node {
         Layout::Split { direction, children } => {
@@ -145,14 +171,14 @@ fn build_recursive(
                     // Pre-launch the first leaf of every remaining tab.
                     let mut child_addrs = vec![first_leaf_addr.to_string()];
                     for (_, child) in children[1..].iter() {
-                        let addr = launch_first_leaf(child, terminal, cwd)?;
+                        let addr = launch_first_leaf(child, terminal, cwd, timeout)?;
                         child_addrs.push(addr);
                     }
 
                     // Build the internal structure of each tab.
                     for (i, (_, child)) in children.iter().enumerate() {
                         focus_window(&child_addrs[i])?;
-                        build_recursive(child, &child_addrs[i], terminal, cwd)?;
+                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout)?;
                     }
 
                     Ok(())
@@ -168,14 +194,14 @@ fn build_recursive(
                     // opening as a sibling.
                     let mut child_addrs = vec![first_leaf_addr.to_string()];
                     for (_, child) in children[1..].iter() {
-                        let addr = launch_first_leaf(child, terminal, cwd)?;
+                        let addr = launch_first_leaf(child, terminal, cwd, timeout)?;
                         child_addrs.push(addr);
                     }
 
                     // Build the internal structure of each child.
                     for (i, (_, child)) in children.iter().enumerate() {
                         focus_window(&child_addrs[i])?;
-                        build_recursive(child, &child_addrs[i], terminal, cwd)?;
+                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout)?;
                     }
 
                     // Apply size ratios if at least one child specifies one.

@@ -7,6 +7,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::process::Command;
+use std::time::Duration;
 
 use clap::Parser;
 use clap::error::ErrorKind;
@@ -38,7 +39,11 @@ struct Args {
     /// The layout of the containers. This should be a string representation of
     /// the container structure, for example:
     ///   t(h(v(30%:{ranger}, {"tig -w"}), 30%:{}), h({vim}, {opencode}))
-    layout: Layout
+    layout: Layout,
+
+    /// Optional timeout in milliseconds for the layout application. If not specified,
+    #[arg(long, default_value = "5000")]
+    timeout: u64,
 }
 
 fn main() {
@@ -53,7 +58,7 @@ fn main() {
 
     let cwd = args.cwd.unwrap_or_else(|| PathBuf::from(HOME_DIR.as_str()));
 
-    if let Err(e) = build(&args.layout, &args.terminal, &cwd) {
+    if let Err(e) = build(&args.layout, &args.terminal, &cwd, Duration::from_millis(args.timeout)) {
         let msg = format!("hypr-layout: {e:#}");
         eprintln!("{msg}");
         notify_error(&msg);
