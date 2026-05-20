@@ -74,11 +74,9 @@ fn parse_split(input: &str) -> Result<(&str, Layout)> {
 fn parse_leaf(input: &str) -> Result<(&str, Layout)> {
     let trimmed_in      = input.trim_start();
     let mut brace_depth = 0;
-    let mut paren_depth = 0;
     let mut iter        = trimmed_in.char_indices();
     let (end_of_command_pos, rest_start_pos) = loop {
         match iter.next() {
-            Some((_, '(')) => paren_depth += 1,
             Some((_, '{')) => brace_depth += 1,
             Some((i, '}')) => {
                 brace_depth -= 1;
@@ -87,17 +85,10 @@ fn parse_leaf(input: &str) -> Result<(&str, Layout)> {
                 }
             },
             Some((i, ',')) if brace_depth == 0 => break (i, i),
-            Some((i, ')')) => {
-                if paren_depth == 0 && brace_depth == 0 {
-                    break (i, i)
-                }
-                if paren_depth > 0 {
-                    paren_depth -= 1;
-                }
-            },
+            Some((i, ')')) if brace_depth == 0 => break (i, i),
             Some(_) => {}
             None => {
-                if brace_depth != 0 || paren_depth != 0 {
+                if brace_depth != 0 {
                     anyhow::bail!("Unmatched braces or parentheses in leaf command: {}", input);
                 }
                 break (trimmed_in.len(), trimmed_in.len())
