@@ -49,7 +49,7 @@ struct Args {
 
 fn main() {
     let args = Args::try_parse().unwrap_or_else(|e| {
-        e.print().unwrap();
+        e.print().ok();
 
         if !matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
             notify_error(&e.to_string());
