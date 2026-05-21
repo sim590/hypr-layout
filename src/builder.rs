@@ -86,6 +86,72 @@ fn validate_layout(layout: &Layout, use_hy3: bool) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal conventions
+// ---------------------------------------------------------------------------
+
+/// Wraps a string in single quotes, escaping any inner single quotes.
+/// e.g. `l'été` → `'l'\''été'`.
+/// Use only for strings embedded inside a `sh -c` argument.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn build_command(command: &Option<String>, cwd: &Path, terminal: &str) -> Command {
+    let mut cmd = Command::new(terminal);
+
+    // If a command is provided, use it directly — it is already a shell
+    // expression and must not be quoted. Otherwise fall back to $SHELL so
+    // that sh expands the variable itself.
+    let exec_arg = match command.as_deref() {
+        Some(c) => format!("exec {c}"),
+        None    => "exec $SHELL".to_string(),
+    };
+
+    match terminal {
+        "alacritty"
+      | "ghostty"
+      | "xfce4-terminal"
+      | "tilix"
+      | "sakura"
+      | "terminator"
+      | "rio" => {
+            cmd.arg("--working-directory").arg(cwd)
+               .arg("-e").arg("sh").arg("-c").arg(&exec_arg);
+        }
+        "kitty" => {
+            cmd.arg("--directory").arg(cwd)
+               .arg("--").arg("sh").arg("-c").arg(&exec_arg);
+        }
+        "foot" => {
+            // foot passes the command as positional arguments (no -e flag)
+            cmd.arg("--working-directory").arg(cwd)
+               .arg("sh").arg("-c").arg(&exec_arg);
+        }
+        "gnome-terminal" => {
+            cmd.arg("--working-directory").arg(cwd)
+               .arg("--").arg("sh").arg("-c").arg(&exec_arg);
+        }
+        "konsole" => {
+            cmd.arg("--workdir").arg(cwd)
+               .arg("-e").arg("sh").arg("-c").arg(&exec_arg);
+        }
+        "wezterm" => {
+            // wezterm requires the "start" subcommand
+            cmd.arg("start").arg("--cwd").arg(cwd)
+               .arg("--").arg("sh").arg("-c").arg(&exec_arg);
+        }
+        _ => {
+            // Fallback: no guaranteed --working-directory flag; embed the
+            // cd into the sh -c string instead.
+            let cwd_esc = shell_escape(&cwd.display().to_string());
+            cmd.arg("-e").arg("sh").arg("-c")
+               .arg(format!("cd {cwd_esc} && {exec_arg}"));
+        }
+    }
+    cmd
+}
+
+// ---------------------------------------------------------------------------
 // Window launching
 // ---------------------------------------------------------------------------
 
@@ -103,8 +169,8 @@ fn launch_first_leaf(node: &Layout, terminal: &str, cwd: &Path, timeout: Duratio
         Layout::Leaf { command, terminal: is_terminal } => {
             let (child_process, label) = match (is_terminal, command.as_deref()) {
                 (false, Some(c)) => (Command::new("setsid").args(["sh", "-c", c]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?, c),
-                (true,  Some(c)) => (Command::new(terminal).arg("--working-directory").arg(cwd).arg("-e").args(["sh", "-c", c]).spawn()?, c),
-                (true,  None)    => (Command::new(terminal).arg("--working-directory").arg(cwd).spawn()?, terminal),
+                (true,  Some(c)) => (build_command(command, cwd, terminal).spawn()?, c),
+                (true,  None)    => (build_command(command, cwd, terminal).spawn()?, terminal),
                 (_,     None)    => anyhow::bail!("Leaf node has no command to execute!"),
             };
             wait_for_window(Some(child_process), timeout, label)
