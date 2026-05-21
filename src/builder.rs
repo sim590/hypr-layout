@@ -57,6 +57,18 @@ fn focus_window(addr: &str) -> Result<()> {
     dispatch(&["focuswindow", &format!("address:{addr}")])
 }
 
+fn is_floating(addr: &str) -> Result<bool> {
+    for _ in 0..5 {
+        let clients_json                    = hyprctl(&["clients", "-j"])?;
+        let clients: Vec<serde_json::Value> = serde_json::from_slice(&clients_json)?;
+        if let Some(client) = clients.iter().find(|v| v["address"].as_str() == Some(addr) ) {
+            return Ok(client["floating"].as_bool() == Some(true));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(false)
+}
+
 enum LayoutEngine { Hy3, Dwindle }
 impl FromStr for LayoutEngine {
     type Err = anyhow::Error;
@@ -226,7 +238,13 @@ fn wait_for_window(mut child_process: Option<std::process::Child>, timeout: Dura
                                .context("Failed to parse openwindow event")?
                                .trim()
                                .to_string();
-                return Ok(format!("0x{addr}"));
+                let addr_str = format!("0x{addr}");
+
+                if is_floating(&addr_str)? {
+                    continue;
+                }
+
+                return Ok(addr_str);
             },
             Ok(_) => {},
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
