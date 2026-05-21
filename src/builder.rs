@@ -2,6 +2,7 @@
 use std::path::Path;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::ExitStatusExt;
 use std::time::Duration;
 use std::process::{Command, Stdio};
 
@@ -147,11 +148,15 @@ fn wait_for_window(mut child_process: Option<std::process::Child>, timeout: Dura
             Err(e) => return Err(e.into()),
         }
 
-        if let Some(c) = child_process.as_mut() && let Some(status) = c.try_wait()? && !status.success() {
-            anyhow::bail!(
-                "'{command}' exited with {status} before creating a window.\n\
-                 If it is a TUI app, use '{{{command}}}' to run it inside a terminal."
-            );
+        if let Some(c) = child_process.as_mut() && let Some(status) = c.try_wait()? {
+            if let Some(sig) = status.signal() {
+                anyhow::bail!(
+                    "'{command}' was killed by signal {sig} before creating a window.\n\
+                     If it is a TUI app, perhaps make sure to use '{{{command}}}' to run it inside a terminal."
+                );
+            }
+            // Normal exit, stop monitoring, keep waiting for window
+            child_process = None;
         }
 
         if start.elapsed() > timeout {
