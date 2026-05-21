@@ -6,7 +6,7 @@ use anyhow::Context;
 
 use crate::ast::{Layout};
 
-// t(h(v(30%:{ranger}, {"tig -w"}), 50%:{}), h({vim}, {opencode}))
+// t(h(v(30%:{ranger}, {tig -w}), 50%:{}), h({vim}, {opencode}))
 //
 // Grammaire:
 //   layout = (ratio ':')? node

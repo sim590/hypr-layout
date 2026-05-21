@@ -38,7 +38,7 @@ struct Args {
 
     /// The layout of the containers. This should be a string representation of
     /// the container structure, for example:
-    ///   t(h(v(30%:{ranger}, {"tig -w"}), 30%:{}), h({vim}, {opencode}))
+    ///   t(h(v(30%:{ranger}, {tig -w}), 30%:{}), h({vim}, {opencode}))
     layout: Layout,
 
     /// Optional timeout in milliseconds for the layout application. If not specified,
