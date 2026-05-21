@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 
 use crate::ast::{Direction, Layout};
 
+const TABBED_SPLIT_ERROR: &str = "Tabbed splits require the hy3 plugin to be installed and the default layout set to hy3.";
+
 // ---------------------------------------------------------------------------
 // hyprctl wrappers
 // ---------------------------------------------------------------------------
@@ -39,8 +41,25 @@ fn direction_to_hy3(direction: &Direction) -> &'static str {
     }
 }
 
+fn direction_to_dwindle_preselect(direction: &Direction) -> Result<&'static str> {
+    let s = match direction {
+        Direction::Horizontal => "r",
+        Direction::Vertical   => "d",
+        Direction::Tabbed     => anyhow::bail!(TABBED_SPLIT_ERROR),
+    };
+    Ok(s)
+}
+
 fn focus_window(addr: &str) -> Result<()> {
     dispatch(&["focuswindow", &format!("address:{addr}")])
+}
+
+fn detect_hy3() -> Result<bool> {
+    let plugins_json                      = hyprctl(&["plugins", "list", "-j"])?;
+    let plugins: Vec<serde_json::Value>   = serde_json::from_slice(&plugins_json)?;
+    let general_layout_json               = hyprctl(&["getoption", "general:layout", "-j"])?;
+    let general_layout: serde_json::Value = serde_json::from_slice(&general_layout_json)?;
+    Ok(plugins.iter().any(|p| p["name"].as_str() == Some("hy3")) && general_layout["str"].as_str() == Some("hy3"))
 }
 
 // ---------------------------------------------------------------------------
@@ -48,8 +67,21 @@ fn focus_window(addr: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 pub fn build(layout: &Layout, terminal: &str, cwd: &Path, timeout: Duration) -> Result<()> {
+    let use_hy3    = detect_hy3()?;
+    validate_layout(layout, use_hy3)?;
     let first_addr = launch_first_leaf(layout, terminal, cwd, timeout)?;
-    build_recursive(layout, &first_addr, terminal, cwd, timeout)
+    build_recursive(layout, &first_addr, terminal, cwd, timeout, use_hy3)
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+fn validate_layout(layout: &Layout, use_hy3: bool) -> Result<()> {
+    match layout {
+        Layout::Split { direction: Direction::Tabbed, .. } if !use_hy3 => anyhow::bail!(TABBED_SPLIT_ERROR),
+        Layout::Split { children, .. }                                 => children.iter().try_for_each(|(_, child)| validate_layout(child, use_hy3)),
+        _                                                              => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,17 +169,18 @@ fn wait_for_window(mut child_process: Option<std::process::Child>, timeout: Dura
 // Layout building
 // ---------------------------------------------------------------------------
 
-/// Recursively build the hy3 layout.
+/// Recursively build the layout (hy3 or dwindle).
 ///
 /// Precondition: the first leaf of `node` has already been launched and is
 /// focused; its Hyprland address is `first_leaf_addr`.
 ///
 /// Strategy shared by both the h/v and tabbed branches:
 ///   1. Pre-launch the first leaf of ALL remaining children before building
-///      the internal structure of the first child. This ensures the parent
-///      group always has multiple members, preventing hy3 from bubbling an
-///      exec past the group boundary (e.g. into a parent tabbed group) when
-///      the first child is temporarily the only member.
+///      the internal structure of the first child.
+///      - hy3: prevents the parent group from having a single member, which
+///        would cause hy3 to bubble an exec past the group boundary.
+///      - dwindle: each sibling is placed with `preselect` relative to the
+///        previous one, anchoring the split boundary before recursing.
 ///   2. Build each child's internal structure by navigating with
 ///      `focus_window` — no `changefocus raise` needed.
 fn build_recursive(
@@ -156,6 +189,7 @@ fn build_recursive(
     terminal:        &str,
     cwd:             &Path,
     timeout:         Duration,
+    use_hy3:         bool,
 ) -> Result<()> {
     match node {
         Layout::Split { direction, children } => {
@@ -164,6 +198,7 @@ fn build_recursive(
             }
 
             match direction {
+                Direction::Tabbed if !use_hy3 => anyhow::bail!(TABBED_SPLIT_ERROR),
                 Direction::Tabbed => {
                     dispatch(&["hy3:changegroup", "tab"])?;
                     focus_window(first_leaf_addr)?;
@@ -178,22 +213,27 @@ fn build_recursive(
                     // Build the internal structure of each tab.
                     for (i, (_, child)) in children.iter().enumerate() {
                         focus_window(&child_addrs[i])?;
-                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout)?;
+                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, use_hy3)?;
                     }
 
                     Ok(())
                 }
                 _ => {
-                    dispatch(&["hy3:makegroup", direction_to_hy3(direction)])?;
+                    if use_hy3 {
+                        dispatch(&["hy3:makegroup", direction_to_hy3(direction)])?;
+                    }
                     focus_window(first_leaf_addr)?;
 
-                    // Pre-launch the first leaf of every remaining child so that
-                    // the h/v group has all its members from the start. Without
-                    // this, an exec inside the first child (when it is the sole
-                    // member) can escape to a parent tabbed group instead of
-                    // opening as a sibling.
+                    // Pre-launch the first leaf of every remaining child.
+                    // In dwindle mode, each sibling is placed with preselect
+                    // relative to the previous one. In hy3 mode, this ensures
+                    // the group always has multiple members before recursing.
                     let mut child_addrs = vec![first_leaf_addr.to_string()];
-                    for (_, child) in children[1..].iter() {
+                    for (last_child_i, (_, child)) in children[1..].iter().enumerate() {
+                        if !use_hy3 {
+                            focus_window(&child_addrs[last_child_i])?;
+                            dispatch(&["layoutmsg", "preselect", direction_to_dwindle_preselect(direction)?])?;
+                        }
                         let addr = launch_first_leaf(child, terminal, cwd, timeout)?;
                         child_addrs.push(addr);
                     }
@@ -201,7 +241,7 @@ fn build_recursive(
                     // Build the internal structure of each child.
                     for (i, (_, child)) in children.iter().enumerate() {
                         focus_window(&child_addrs[i])?;
-                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout)?;
+                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, use_hy3)?;
                     }
 
                     // Apply size ratios if at least one child specifies one.
@@ -231,7 +271,7 @@ fn apply_split_ratios(
     debug_assert_eq!(ratios.len(), addrs.len());
     let n = ratios.len();
 
-    // No explicit ratio — hy3 already distributes space evenly.
+    // No explicit ratio — the layout engine already distributes space evenly.
     if ratios.iter().all(|&r| r == 0) {
         return Ok(());
     }
