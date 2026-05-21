@@ -1,4 +1,5 @@
 
+use std::str::FromStr;
 use std::path::Path;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
@@ -55,12 +56,22 @@ fn focus_window(addr: &str) -> Result<()> {
     dispatch(&["focuswindow", &format!("address:{addr}")])
 }
 
-fn detect_hy3() -> Result<bool> {
-    let plugins_json                      = hyprctl(&["plugins", "list", "-j"])?;
-    let plugins: Vec<serde_json::Value>   = serde_json::from_slice(&plugins_json)?;
+enum LayoutEngine { Hy3, Dwindle }
+impl FromStr for LayoutEngine {
+    type Err = anyhow::Error;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "hy3"     => Ok(LayoutEngine::Hy3),
+            "dwindle" => Ok(LayoutEngine::Dwindle),
+            _         => anyhow::bail!("Unsupported Layout: {input}. hypr-layout only supports hy3 and dwindle.")
+        }
+    }
+}
+
+fn detect_layout_engine() -> Result<LayoutEngine> {
     let general_layout_json               = hyprctl(&["getoption", "general:layout", "-j"])?;
     let general_layout: serde_json::Value = serde_json::from_slice(&general_layout_json)?;
-    Ok(plugins.iter().any(|p| p["name"].as_str() == Some("hy3")) && general_layout["str"].as_str() == Some("hy3"))
+    LayoutEngine::from_str(general_layout["str"].as_str().unwrap_or(""))
 }
 
 // ---------------------------------------------------------------------------
@@ -68,20 +79,20 @@ fn detect_hy3() -> Result<bool> {
 // ---------------------------------------------------------------------------
 
 pub fn build(layout: &Layout, terminal: &str, cwd: &Path, timeout: Duration) -> Result<()> {
-    let use_hy3    = detect_hy3()?;
-    validate_layout(layout, use_hy3)?;
+    let layout_engine = detect_layout_engine()?;
+    validate_layout(layout, &layout_engine)?;
     let first_addr = launch_first_leaf(layout, terminal, cwd, timeout)?;
-    build_recursive(layout, &first_addr, terminal, cwd, timeout, use_hy3)
+    build_recursive(layout, &first_addr, terminal, cwd, timeout, &layout_engine)
 }
 
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
-fn validate_layout(layout: &Layout, use_hy3: bool) -> Result<()> {
-    match layout {
-        Layout::Split { direction: Direction::Tabbed, .. } if !use_hy3 => anyhow::bail!(TABBED_SPLIT_ERROR),
-        Layout::Split { children, .. }                                 => children.iter().try_for_each(|(_, child)| validate_layout(child, use_hy3)),
-        _                                                              => Ok(()),
+fn validate_layout(layout: &Layout, layout_engine: &LayoutEngine) -> Result<()> {
+    match (layout, layout_engine) {
+        (Layout::Split { direction: Direction::Tabbed, .. }, LayoutEngine::Dwindle) => anyhow::bail!(TABBED_SPLIT_ERROR),
+        (Layout::Split { children, .. }, _)                                         => children.iter().try_for_each(|(_, child)| validate_layout(child, layout_engine)),
+        _                                                                           => Ok(()),
     }
 }
 
@@ -260,7 +271,7 @@ fn build_recursive(
     terminal:        &str,
     cwd:             &Path,
     timeout:         Duration,
-    use_hy3:         bool,
+    layout_engine:   &LayoutEngine,
 ) -> Result<()> {
     match node {
         Layout::Split { direction, children } => {
@@ -268,9 +279,8 @@ fn build_recursive(
                 anyhow::bail!("Split node has no children");
             }
 
-            match direction {
-                Direction::Tabbed if !use_hy3 => anyhow::bail!(TABBED_SPLIT_ERROR),
-                Direction::Tabbed => {
+            match (direction, layout_engine) {
+                (Direction::Tabbed, LayoutEngine::Hy3) => {
                     dispatch(&["hy3:changegroup", "tab"])?;
                     focus_window(first_leaf_addr)?;
 
@@ -284,13 +294,14 @@ fn build_recursive(
                     // Build the internal structure of each tab.
                     for (i, (_, child)) in children.iter().enumerate() {
                         focus_window(&child_addrs[i])?;
-                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, use_hy3)?;
+                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, layout_engine)?;
                     }
 
                     Ok(())
                 }
+                (Direction::Tabbed, _) => anyhow::bail!(TABBED_SPLIT_ERROR),
                 _ => {
-                    if use_hy3 {
+                    if let LayoutEngine::Hy3 = layout_engine {
                         dispatch(&["hy3:makegroup", direction_to_hy3(direction)])?;
                     }
                     focus_window(first_leaf_addr)?;
@@ -301,7 +312,7 @@ fn build_recursive(
                     // the group always has multiple members before recursing.
                     let mut child_addrs = vec![first_leaf_addr.to_string()];
                     for (last_child_i, (_, child)) in children[1..].iter().enumerate() {
-                        if !use_hy3 {
+                        if let LayoutEngine::Dwindle = layout_engine {
                             focus_window(&child_addrs[last_child_i])?;
                             dispatch(&["layoutmsg", "preselect", direction_to_dwindle_preselect(direction)?])?;
                         }
@@ -312,7 +323,7 @@ fn build_recursive(
                     // Build the internal structure of each child.
                     for (i, (_, child)) in children.iter().enumerate() {
                         focus_window(&child_addrs[i])?;
-                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, use_hy3)?;
+                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, layout_engine)?;
                     }
 
                     // Apply size ratios if at least one child specifies one.
