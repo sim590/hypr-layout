@@ -6,6 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::time::Duration;
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 
@@ -192,9 +193,17 @@ fn launch_first_leaf(node: &Layout, terminal: &str, cwd: &Path, timeout: Duratio
 /// Block until a new window is opened, listening on the Hyprland event socket.
 /// Returns the window address in "0xADDRESS" format.
 fn wait_for_window(mut child_process: Option<std::process::Child>, timeout: Duration, command: &str) -> Result<String> {
+    static XDG_RUNTIME: LazyLock<String> = LazyLock::new(|| {
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
+            let uid = std::process::Command::new("id").arg("-u").output()
+                                                                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                                                                .expect("impossible d'obtenir l'UID");
+            format!("/run/user/{uid}")
+        })
+    });
+
     let sig            = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")?;
-    let xdg_runtime    = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
-    let connector_path = format!("{xdg_runtime}/hypr/{sig}/.socket2.sock");
+    let connector_path = format!("{}/hypr/{sig}/.socket2.sock", XDG_RUNTIME.as_str());
     let mut stream     = UnixStream::connect(&connector_path).context("Failed to connect to Hyprland socket")?;
 
     stream.set_read_timeout(Some(Duration::from_millis(100)))?;
