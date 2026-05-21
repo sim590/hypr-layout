@@ -42,6 +42,7 @@ struct Args {
     layout: Layout,
 
     /// Optional timeout in milliseconds for the layout application. If not specified,
+    /// it will default to 5000 ms (5 seconds).
     #[arg(long, default_value = "5000")]
     timeout: u64,
 }
