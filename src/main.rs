@@ -26,6 +26,7 @@ fn notify_error(msg: &str) {
 }
 
 #[derive(Parser)]
+#[command(version)]
 struct Args {
     /// The terminal emulator to use for leaf nodes. Default is "alacritty".
     #[arg(long, default_value = "alacritty")]
