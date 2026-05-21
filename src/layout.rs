@@ -102,12 +102,9 @@ fn parse_leaf(input: &str) -> Result<(&str, Layout)> {
     // Check for ratios in the command. This is to prevent waiting on timeout if the user
     // accidentally writes something like "{30%:vim}" when he really meant "30%:{vim}".
     let misplaced_ratio = detect_ratio(&command);
-    match misplaced_ratio {
-        Ok((_, Some(_))) => {
-            let (r, c) = command.split_once(':').unwrap();
-            anyhow::bail!("Ratios for terminal commands must prefix braces {{...}}. Perhaps you meant {r}:{{{c}}}")
-        },
-        _ => {}
+    if let Ok((_, Some(_))) = misplaced_ratio {
+        let (r, c) = command.split_once(':').unwrap();
+        anyhow::bail!("Ratios for terminal commands must prefix braces {{...}}. Perhaps you meant {r}:{{{c}}}")
     }
 
     let leaf = Layout::Leaf { command: (!command.is_empty()).then_some(command), terminal: is_braced };
