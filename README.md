@@ -25,7 +25,34 @@ cargo install hypr-layout
 
 ### Arch Linux (AUR)
 
-*Coming soon.*
+```bash
+yay -S hypr-layout-bin
+```
+
+### Nix / NixOS
+
+Run without installing:
+
+```bash
+nix run github:sim590/hypr-layout -- 'h(70%:{btop},{nvtop})'
+```
+
+Install into your profile:
+
+```bash
+nix profile install github:sim590/hypr-layout
+```
+
+Or add it declaratively to your NixOS or home-manager configuration:
+
+```nix
+inputs.hypr-layout.url = "github:sim590/hypr-layout";
+# then refer to inputs.hypr-layout.packages.${system}.default
+```
+
+> [!NOTE]
+> The `nix-command` and `flakes` experimental features must be enabled in your
+> Nix configuration.
 
 ## Usage
 
