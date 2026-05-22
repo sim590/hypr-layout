@@ -9,6 +9,10 @@ authors     = ["Simon Désaulniers"]
 keywords    = ["hyprland", "wayland", "tiling", "layout", "window-manager"]
 categories  = ["command-line-utilities"]
 readme      = "README.md"
+include     = [ "src/"
+              , "LICENSE"
+              , "README.md" 
+              ]
 
 [dependencies]
 clap       = { version = "4", features = ["derive"] }
