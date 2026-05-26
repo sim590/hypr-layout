@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use clap::error::ErrorKind;
+use which::which;
 
 use crate::ast::Layout;
 use crate::builder::build;
@@ -23,6 +24,12 @@ static HOME_DIR: LazyLock<String> = LazyLock::new(|| {
 fn notify_error(msg: &str) {
     let _ = Command::new("hyprctl").args(["notify", "3", "7000", "rgb(ff3333)", &format!("fontsize:14 {msg}")])
                                    .status();
+}
+
+fn display_and_notify_error(msg: anyhow::Error) {
+    let decorated_msg = format!("hypr-layout: {msg:#}");
+    eprintln!("{decorated_msg}");
+    notify_error(&decorated_msg);
 }
 
 #[derive(Parser)]
@@ -60,10 +67,13 @@ fn main() {
 
     let cwd = args.cwd.unwrap_or_else(|| PathBuf::from(HOME_DIR.as_str()));
 
-    if let Err(e) = build(&args.layout, &args.terminal, &cwd, Duration::from_millis(args.timeout)) {
-        let msg = format!("hypr-layout: {e:#}");
-        eprintln!("{msg}");
-        notify_error(&msg);
+    let run = || {
+        which(&args.terminal).map_err(|_| anyhow::anyhow!("Terminal '{}' cannot be found!", args.terminal))?;
+        build(&args.layout, &args.terminal, &cwd, Duration::from_millis(args.timeout))
+    };
+
+    if let Err(e) = run() {
+        display_and_notify_error(e);
         std::process::exit(1);
     }
 }
