@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use which::which;
 
 use crate::ast::{Direction, Layout};
 
@@ -93,7 +94,7 @@ fn detect_layout_engine() -> Result<LayoutEngine> {
 
 pub fn build(layout: &Layout, terminal: &str, cwd: &Path, timeout: Duration) -> Result<()> {
     let layout_engine = detect_layout_engine()?;
-    validate_layout(layout, &layout_engine)?;
+    validate(layout, &layout_engine)?;
     let first_addr = launch_first_leaf(layout, terminal, cwd, timeout)?;
     build_recursive(layout, &first_addr, terminal, cwd, timeout, &layout_engine)
 }
@@ -101,10 +102,15 @@ pub fn build(layout: &Layout, terminal: &str, cwd: &Path, timeout: Duration) -> 
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
-fn validate_layout(layout: &Layout, layout_engine: &LayoutEngine) -> Result<()> {
+fn validate(layout: &Layout, layout_engine: &LayoutEngine) -> Result<()> {
     match (layout, layout_engine) {
         (Layout::Split { direction: Direction::Tabbed, .. }, LayoutEngine::Dwindle) => anyhow::bail!(TABBED_SPLIT_ERROR),
-        (Layout::Split { children, .. }, _)                                         => children.iter().try_for_each(|(_, child)| validate_layout(child, layout_engine)),
+        (Layout::Split { children, .. }, _)                                         => children.iter().try_for_each(|(_, child)| validate(child, layout_engine)),
+        (Layout::Leaf { command: Some(c), .. }, _)                                  => {
+            let p = parse_program_from_cmd(c)?;
+            which(p).with_context(|| format!("{p}"))?;
+            Ok(())
+        },
         _                                                                           => Ok(()),
     }
 }
@@ -118,6 +124,18 @@ fn validate_layout(layout: &Layout, layout_engine: &LayoutEngine) -> Result<()> 
 /// Use only for strings embedded inside a `sh -c` argument.
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn parse_program_from_cmd(cmd: &str) -> Result<&str> {
+    let s = cmd.trim_start();
+    if let Some(q) = s.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+        s[1..].split_once(q)
+              .map(|(prog, _)| prog)
+              .with_context(|| format!("The program in the command couldn't be parsed correctly from '{cmd}'"))
+    } else {
+        let end = s.find(' ').unwrap_or(s.len());
+        Ok(&s[..end])
+    }
 }
 
 fn build_command(command: &Option<String>, cwd: &Path, terminal: &str) -> Command {
