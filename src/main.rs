@@ -23,7 +23,7 @@ static HOME_DIR: LazyLock<String> = LazyLock::new(|| {
 
 fn notify_error(msg: &str) {
     let _ = Command::new("hyprctl").args(["notify", "3", "7000", "rgb(ff3333)", &format!("fontsize:14 {msg}")])
-                                   .status();
+                                   .output();
 }
 
 fn display_and_notify_error(msg: anyhow::Error) {
