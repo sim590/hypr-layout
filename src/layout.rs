@@ -141,3 +141,287 @@ impl FromStr for Layout {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Direction, Layout};
+
+    // --- detect_ratio -------------------------------------------------------
+
+    #[test]
+    fn detect_ratio_none_when_absent() {
+        let (rest, r) = detect_ratio("vim").unwrap();
+        assert_eq!(rest, "vim");
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn detect_ratio_none_without_percent_colon() {
+        let (rest, r) = detect_ratio("30rest").unwrap();
+        assert_eq!(rest, "30rest");
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn detect_ratio_extracts_value() {
+        let (rest, r) = detect_ratio("30%:rest").unwrap();
+        assert_eq!(rest, "rest");
+        assert_eq!(r, Some(30));
+    }
+
+    #[test]
+    fn detect_ratio_u8_overflow() {
+        assert!(detect_ratio("256%:rest").is_err());
+    }
+
+    // --- parse_ratio --------------------------------------------------------
+
+    #[test]
+    fn parse_ratio_valid() {
+        let (rest, r) = parse_ratio("50%:rest").unwrap();
+        assert_eq!(rest, "rest");
+        assert_eq!(r, Some(50));
+    }
+
+    #[test]
+    fn parse_ratio_exactly_100() {
+        let (_, r) = parse_ratio("100%:rest").unwrap();
+        assert_eq!(r, Some(100));
+    }
+
+    #[test]
+    fn parse_ratio_zero_rejected() {
+        assert!(parse_ratio("0%:rest").is_err());
+    }
+
+    #[test]
+    fn parse_ratio_above_100_rejected() {
+        assert!(parse_ratio("101%:rest").is_err());
+    }
+
+    // --- parse_leaf ---------------------------------------------------------
+
+    #[test]
+    fn parse_leaf_bare_command() {
+        let (rest, leaf) = parse_leaf("vim").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(leaf, Layout::Leaf { command: Some("vim".into()), terminal: false });
+    }
+
+    #[test]
+    fn parse_leaf_braced_command() {
+        let (rest, leaf) = parse_leaf("{vim}").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(leaf, Layout::Leaf { command: Some("vim".into()), terminal: true });
+    }
+
+    #[test]
+    fn parse_leaf_empty_braces() {
+        let (rest, leaf) = parse_leaf("{}").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(leaf, Layout::Leaf { command: None, terminal: true });
+    }
+
+    #[test]
+    fn parse_leaf_stops_at_comma() {
+        let (rest, leaf) = parse_leaf("vim, other").unwrap();
+        assert_eq!(rest, ", other");
+        assert_eq!(leaf, Layout::Leaf { command: Some("vim".into()), terminal: false });
+    }
+
+    #[test]
+    fn parse_leaf_stops_at_close_paren() {
+        let (rest, leaf) = parse_leaf("vim)").unwrap();
+        assert_eq!(rest, ")");
+        assert_eq!(leaf, Layout::Leaf { command: Some("vim".into()), terminal: false });
+    }
+
+    #[test]
+    fn parse_leaf_misplaced_ratio_rejected() {
+        assert!(parse_leaf("{30%:vim}").is_err());
+    }
+
+    #[test]
+    fn parse_leaf_unclosed_brace_rejected() {
+        assert!(parse_leaf("{vim").is_err());
+    }
+
+    #[test]
+    fn parse_leaf_command_with_args() {
+        let (rest, leaf) = parse_leaf("{tig -w}").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(leaf, Layout::Leaf { command: Some("tig -w".into()), terminal: true });
+    }
+
+    // --- parse_split --------------------------------------------------------
+
+    #[test]
+    fn parse_split_horizontal() {
+        let (rest, split) = parse_split("h({vim}, {nvim})").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(split, Layout::Split {
+            direction: Direction::Horizontal,
+            children: vec![
+                (0, Layout::Leaf { command: Some("vim".into()),  terminal: true }),
+                (0, Layout::Leaf { command: Some("nvim".into()), terminal: true }),
+            ],
+        });
+    }
+
+    #[test]
+    fn parse_split_vertical() {
+        let (_, split) = parse_split("v({vim}, {nvim})").unwrap();
+        assert!(matches!(split, Layout::Split { direction: Direction::Vertical, .. }));
+    }
+
+    #[test]
+    fn parse_split_tabbed() {
+        let (_, split) = parse_split("t({vim}, {nvim})").unwrap();
+        assert!(matches!(split, Layout::Split { direction: Direction::Tabbed, .. }));
+    }
+
+    #[test]
+    fn parse_split_with_ratios() {
+        let (rest, split) = parse_split("h(30%:{vim}, {nvim})").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(split, Layout::Split {
+            direction: Direction::Horizontal,
+            children: vec![
+                (30, Layout::Leaf { command: Some("vim".into()),  terminal: true }),
+                (0,  Layout::Leaf { command: Some("nvim".into()), terminal: true }),
+            ],
+        });
+    }
+
+    #[test]
+    fn parse_split_unclosed_paren_rejected() {
+        assert!(parse_split("h({vim}").is_err());
+    }
+
+    #[test]
+    fn parse_split_three_children() {
+        let (_, split) = parse_split("h({a}, {b}, {c})").unwrap();
+        if let Layout::Split { children, .. } = split {
+            assert_eq!(children.len(), 3);
+        } else {
+            panic!("expected Split");
+        }
+    }
+
+    // --- parse_layout -------------------------------------------------------
+
+    #[test]
+    fn parse_layout_with_ratio() {
+        let (rest, (ratio, layout)) = parse_layout("30%:{vim}").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(ratio, 30);
+        assert_eq!(layout, Layout::Leaf { command: Some("vim".into()), terminal: true });
+    }
+
+    #[test]
+    fn parse_layout_without_ratio() {
+        let (rest, (ratio, _)) = parse_layout("{vim}").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(ratio, 0);
+    }
+
+    #[test]
+    fn parse_layout_leading_whitespace() {
+        let (rest, (ratio, _)) = parse_layout("   {vim}").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(ratio, 0);
+    }
+
+    // --- FromStr for Layout -------------------------------------------------
+
+    #[test]
+    fn from_str_bare_leaf() {
+        let l: Layout = "vim".parse().unwrap();
+        assert_eq!(l, Layout::Leaf { command: Some("vim".into()), terminal: false });
+    }
+
+    #[test]
+    fn from_str_braced_leaf() {
+        let l: Layout = "{vim}".parse().unwrap();
+        assert_eq!(l, Layout::Leaf { command: Some("vim".into()), terminal: true });
+    }
+
+    #[test]
+    fn from_str_empty_braces() {
+        let l: Layout = "{}".parse().unwrap();
+        assert_eq!(l, Layout::Leaf { command: None, terminal: true });
+    }
+
+    #[test]
+    fn from_str_simple_horizontal_split() {
+        let l: Layout = "h({vim}, {nvim})".parse().unwrap();
+        assert_eq!(l, Layout::Split {
+            direction: Direction::Horizontal,
+            children: vec![
+                (0, Layout::Leaf { command: Some("vim".into()),  terminal: true }),
+                (0, Layout::Leaf { command: Some("nvim".into()), terminal: true }),
+            ],
+        });
+    }
+
+    #[test]
+    fn from_str_nested_splits() {
+        let l: Layout = "h(v({vim}, {tig}), {nvim})".parse().unwrap();
+        assert_eq!(l, Layout::Split {
+            direction: Direction::Horizontal,
+            children: vec![
+                (0, Layout::Split {
+                    direction: Direction::Vertical,
+                    children: vec![
+                        (0, Layout::Leaf { command: Some("vim".into()), terminal: true }),
+                        (0, Layout::Leaf { command: Some("tig".into()), terminal: true }),
+                    ],
+                }),
+                (0, Layout::Leaf { command: Some("nvim".into()), terminal: true }),
+            ],
+        });
+    }
+
+    #[test]
+    fn from_str_trailing_content_rejected() {
+        assert!("{vim} extra".parse::<Layout>().is_err());
+    }
+
+    #[test]
+    fn from_str_misplaced_ratio_rejected() {
+        assert!("{30%:vim}".parse::<Layout>().is_err());
+    }
+
+    #[test]
+    fn from_str_zero_ratio_rejected() {
+        assert!("0%:{vim}".parse::<Layout>().is_err());
+    }
+
+    #[test]
+    fn from_str_ratio_above_100_rejected() {
+        assert!("101%:{vim}".parse::<Layout>().is_err());
+    }
+
+    #[test]
+    fn from_str_unclosed_split_rejected() {
+        assert!("h({vim}".parse::<Layout>().is_err());
+    }
+
+    #[test]
+    fn from_str_example_from_comment() {
+        let l = "t(h(v(30%:{ranger}, {tig -w}), 50%:{}), h({vim}, {opencode}))".parse::<Layout>();
+        assert!(l.is_ok());
+        assert!(matches!(l.unwrap(), Layout::Split { direction: Direction::Tabbed, .. }));
+    }
+
+    #[test]
+    fn from_str_empty_input_rejected() {
+        assert!("".parse::<Layout>().is_err());
+    }
+
+    #[test]
+    fn from_str_whitespace_only_rejected() {
+        assert!("   ".parse::<Layout>().is_err());
+    }
+}
+
