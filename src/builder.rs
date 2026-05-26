@@ -403,20 +403,7 @@ fn apply_split_ratios(
         return Ok(());
     }
 
-    // Normalize: fill implicit (zero) ratios with an equal share of what remains.
-    let sum_explicit: u32 = ratios.iter().filter(|&&r| r > 0).map(|&r| r as u32).sum();
-    if sum_explicit > 100 {
-        anyhow::bail!("Ratios exceed 100% (sum = {}%)", sum_explicit);
-    }
-    let count_implicit = ratios.iter().filter(|&&r| r == 0).count();
-    let implicit_ratio = if count_implicit > 0 {
-        (100 - sum_explicit) / count_implicit as u32
-    } else {
-        0
-    };
-    let effective: Vec<u32> = ratios.iter()
-        .map(|&r| if r > 0 { r as u32 } else { implicit_ratio })
-        .collect();
+    let effective = normalize_ratios(ratios)?;
 
     // Snapshot all window sizes before any resize operation.
     let sizes: Vec<(u32, u32)> = addrs.iter()
@@ -471,4 +458,121 @@ fn get_window_size(addr: &str) -> Result<(u32, u32)> {
 /// Resize a window to an exact pixel size.
 fn resize_window_exact(addr: &str, w: u32, h: u32) -> Result<()> {
     dispatch(&["resizewindowpixel", &format!("exact {w} {h},address:{addr}")])
+}
+
+/// Normalize a slice of ratios: explicit (non-zero) values are kept as-is,
+/// implicit (zero) values receive an equal share of the remaining percentage.
+/// Returns an error if the explicit ratios exceed 100%.
+fn normalize_ratios(ratios: &[u8]) -> Result<Vec<u32>> {
+    let sum_explicit: u32 = ratios.iter().filter(|&&r| r > 0).map(|&r| r as u32).sum();
+    if sum_explicit > 100 {
+        anyhow::bail!("Ratios exceed 100% (sum = {}%)", sum_explicit);
+    }
+    let count_implicit = ratios.iter().filter(|&&r| r == 0).count();
+    let implicit_ratio = if count_implicit > 0 {
+        (100 - sum_explicit) / count_implicit as u32
+    } else {
+        0
+    };
+    Ok(ratios.iter()
+        .map(|&r| if r > 0 { r as u32 } else { implicit_ratio })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- shell_escape -------------------------------------------------------
+
+    #[test]
+    fn shell_escape_simple_string() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn shell_escape_empty_string() {
+        assert_eq!(shell_escape(""), "''");
+    }
+
+    #[test]
+    fn shell_escape_with_single_quote() {
+        assert_eq!(shell_escape("l'été"), "'l'\\''été'");
+    }
+
+    #[test]
+    fn shell_escape_with_spaces() {
+        assert_eq!(shell_escape("/home/user/my dir"), "'/home/user/my dir'");
+    }
+
+    // --- parse_program_from_cmd ---------------------------------------------
+
+    #[test]
+    fn parse_program_simple() {
+        assert_eq!(parse_program_from_cmd("vim").unwrap(), "vim");
+    }
+
+    #[test]
+    fn parse_program_with_args() {
+        assert_eq!(parse_program_from_cmd("vim -c 'set nu'").unwrap(), "vim");
+    }
+
+    #[test]
+    fn parse_program_double_quoted_with_spaces() {
+        assert_eq!(parse_program_from_cmd("\"/home/the_user/His Custom Directory/vim\" -c args").unwrap(), "/home/the_user/His Custom Directory/vim");
+    }
+
+    #[test]
+    fn parse_program_double_quoted() {
+        assert_eq!(parse_program_from_cmd("\"vim\" -c args").unwrap(), "vim");
+    }
+
+    #[test]
+    fn parse_program_single_quoted() {
+        assert_eq!(parse_program_from_cmd("'vim' -c args").unwrap(), "vim");
+    }
+
+    #[test]
+    fn parse_program_leading_whitespace() {
+        assert_eq!(parse_program_from_cmd("  vim").unwrap(), "vim");
+    }
+
+    #[test]
+    fn parse_program_unclosed_quote_rejected() {
+        assert!(parse_program_from_cmd("\"unclosed").is_err());
+    }
+
+    // --- normalize_ratios ---------------------------------------------------
+
+    #[test]
+    fn normalize_ratios_all_explicit() {
+        assert_eq!(normalize_ratios(&[30, 70]).unwrap(), vec![30, 70]);
+    }
+
+    #[test]
+    fn normalize_ratios_some_implicit() {
+        // 30 explicit + 2 implicit → each implicit gets (100-30)/2 = 35
+        assert_eq!(normalize_ratios(&[30, 0, 0]).unwrap(), vec![30, 35, 35]);
+    }
+
+    #[test]
+    fn normalize_ratios_all_implicit() {
+        // 3 implicit → each gets 100/3 = 33 (integer division)
+        assert_eq!(normalize_ratios(&[0, 0, 0]).unwrap(), vec![33, 33, 33]);
+    }
+
+    #[test]
+    fn normalize_ratios_single_explicit() {
+        assert_eq!(normalize_ratios(&[100]).unwrap(), vec![100]);
+    }
+
+    #[test]
+    fn normalize_ratios_exceeds_100_rejected() {
+        assert!(normalize_ratios(&[60, 50]).is_err());
+    }
+
+    #[test]
+    fn normalize_ratios_exactly_100() {
+        assert_eq!(normalize_ratios(&[25, 25, 50]).unwrap(), vec![25, 25, 50]);
+    }
 }
