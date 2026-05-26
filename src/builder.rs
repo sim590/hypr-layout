@@ -108,7 +108,7 @@ fn validate(layout: &Layout, layout_engine: &LayoutEngine) -> Result<()> {
         (Layout::Split { children, .. }, _)                                         => children.iter().try_for_each(|(_, child)| validate(child, layout_engine)),
         (Layout::Leaf { command: Some(c), .. }, _)                                  => {
             let p = parse_program_from_cmd(c)?;
-            which(p).with_context(|| format!("{p}"))?;
+            which(p).with_context(|| p.to_string())?;
             Ok(())
         },
         _                                                                           => Ok(()),
