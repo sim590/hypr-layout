@@ -27,7 +27,12 @@ impl FromStr for LayoutEngine {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ConfigProvider { Hyprlang, Lua }
+
 pub struct HyprlandContext {
+    pub layout_engine: LayoutEngine,
+    config_provider: ConfigProvider,
 }
 
 fn hyprctl(args: &[&str]) -> Result<Vec<u8>> {
@@ -45,44 +50,68 @@ impl HyprlandContext {
 
     // Public methods
 
-    pub fn dispatch(args: &[&str]) -> Result<()> {
-        let mut full_args = vec!["dispatch"];
-        full_args.extend_from_slice(args);
-        hyprctl(&full_args)?;
-        Ok(())
+    /// Detect the current layout engine and configuration provider by querying Hyprland.
+    pub fn detect() -> Result<Self> {
+        let layout_engine   = Self::detect_layout_engine()?;
+        let config_provider = Self::detect_config_provider();
+        Ok(Self { layout_engine, config_provider })
     }
 
-    pub fn direction_to_hy3(direction: &Direction) -> &'static str {
-        match direction {
-            Direction::Horizontal => "h",
-            Direction::Vertical   => "v",
-            Direction::Tabbed     => "tab",
-        }
-    }
-
-    pub fn direction_to_dwindle_preselect(direction: &Direction) -> Result<&'static str> {
-        let s = match direction {
-            Direction::Horizontal => "r",
-            Direction::Vertical   => "d",
-            Direction::Tabbed     => anyhow::bail!(TABBED_SPLIT_ERROR),
-        };
-        Ok(s)
-    }
-
-    pub fn focus_window(addr: &str) -> Result<()> {
-        HyprlandContext::dispatch(&["focuswindow", &format!("address:{addr}")])
-    }
-
-    pub fn is_floating(addr: &str) -> Result<bool> {
-        for _ in 0..5 {
-            let clients_json                    = hyprctl(&["clients", "-j"])?;
-            let clients: Vec<serde_json::Value> = serde_json::from_slice(&clients_json)?;
-            if let Some(client) = clients.iter().find(|v| v["address"].as_str() == Some(addr) ) {
-                return Ok(client["floating"].as_bool() == Some(true));
+    /// Focus a window by its address (in "0xADDRESS" format).
+    pub fn focus_window(&self, addr: &str) -> Result<()> {
+        match self.config_provider {
+            ConfigProvider::Lua => {
+                Self::eval_lua(&format!(r#"hl.dispatch(hl.dsp.focus({{window="address:{addr}"}}))"#))?;
+                Ok(())
             }
-            std::thread::sleep(Duration::from_millis(20));
+            ConfigProvider::Hyprlang => Self::dispatch(&["focuswindow", &format!("address:{addr}")]),
         }
-        Ok(false)
+    }
+
+    /// Change the group of the focused window to the specified group type.
+    pub fn hy3_change_group(&self, group_type: &str) -> Result<()> {
+        match self.config_provider {
+            ConfigProvider::Lua => {
+                Self::eval_lua(&format!(r#"hl.dispatch(hl.plugin.hy3.change_group("{group_type}"))"#))?;
+                Ok(())
+            }
+            ConfigProvider::Hyprlang => Self::dispatch(&["hy3:changegroup", group_type])
+        }
+    }
+
+    /// Create a new group in the specified direction and move the focused window into it.
+    pub fn hy3_make_group(&self, direction: &Direction) -> Result<()> {
+        let direction_str = Self::direction_to_hy3(direction);
+        match self.config_provider {
+            ConfigProvider::Lua => {
+                Self::eval_lua(&format!(r#"hl.dispatch(hl.plugin.hy3.make_group("{direction_str}"))"#))?;
+                Ok(())
+            }
+            ConfigProvider::Hyprlang => Self::dispatch(&["hy3:makegroup", direction_str])
+        }
+    }
+
+    /// Send a layout message to the active layout engine (e.g. "preselect r").
+    pub fn layoutmsg(&self, msg: &str) -> Result<()> {
+        match self.config_provider {
+            ConfigProvider::Lua => {
+                Self::eval_lua(&format!(r#"hl.dispatch(hl.dsp.layout("{msg}"))"#))?;
+                Ok(())
+            }
+            ConfigProvider::Hyprlang => Self::dispatch(&["layoutmsg", msg])
+        }
+    }
+
+    /// Resize a window to an exact pixel size.
+    pub fn resize_window_exact(&self, addr: &str, w: u32, h: u32) -> Result<()> {
+        match self.config_provider {
+            ConfigProvider::Lua => {
+                Self::eval_lua(&format!(r#"hl.dispatch(hl.dsp.window.resize({{x={w}, y={h}, relative=false, window="address:{addr}"}}))"#))?;
+                Ok(())
+            }
+            ConfigProvider::Hyprlang => Self::dispatch(&["resizewindowpixel", &format!("exact {w} {h},address:{addr}")])
+        }
+
     }
 
     /// Return the current pixel size of a window looked up by its address.
@@ -99,9 +128,15 @@ impl HyprlandContext {
         anyhow::bail!("Window not found in clients list: {}", addr)
     }
 
-    /// Resize a window to an exact pixel size.
-    pub fn resize_window_exact(addr: &str, w: u32, h: u32) -> Result<()> {
-        HyprlandContext::dispatch(&["resizewindowpixel", &format!("exact {w} {h},address:{addr}")])
+    // Public free functions
+
+    pub fn direction_to_dwindle_preselect(direction: &Direction) -> Result<&'static str> {
+        let s = match direction {
+            Direction::Horizontal => "r",
+            Direction::Vertical   => "d",
+            Direction::Tabbed     => anyhow::bail!(TABBED_SPLIT_ERROR),
+        };
+        Ok(s)
     }
 
     /// Block until a new window is opened, listening on the Hyprland event socket.
@@ -142,7 +177,7 @@ impl HyprlandContext {
                                    .to_string();
                     let addr_str = format!("0x{addr}");
 
-                    if HyprlandContext::is_floating(&addr_str)? {
+                    if Self::is_floating(&addr_str)? {
                         continue;
                     }
 
@@ -176,12 +211,130 @@ impl HyprlandContext {
         }
     }
 
-    // Private methods
+    // Private functions
 
-    pub fn detect_layout_engine() -> Result<LayoutEngine> {
+    fn detect_layout_engine() -> Result<LayoutEngine> {
         let general_layout_json               = hyprctl(&["getoption", "general:layout", "-j"])?;
         let general_layout: serde_json::Value = serde_json::from_slice(&general_layout_json)?;
         LayoutEngine::from_str(general_layout["str"].as_str().unwrap_or(""))
+    }
+
+    fn detect_config_provider() -> ConfigProvider {
+        match Self::eval_lua("return 'ok'") {
+            Ok(s) => {
+                if s.trim() == "ok" {
+                    ConfigProvider::Lua
+                } else {
+                    ConfigProvider::Hyprlang
+                }
+            },
+            _ => ConfigProvider::Hyprlang,
+        }
+    }
+
+    fn eval_lua(code: &str) -> Result<String> {
+        let output = hyprctl(&["eval", code])?;
+        let s      = String::from_utf8_lossy(&output).trim().to_string();
+        if s.find("error").is_some() {
+            anyhow::bail!("Lua error: {s}");
+        } else {
+            Ok(s)
+        }
+    }
+
+    fn dispatch(args: &[&str]) -> Result<()> {
+        let mut full_args = vec!["dispatch"];
+        full_args.extend_from_slice(args);
+
+        let output = hyprctl(&full_args)?;
+        let s = String::from_utf8_lossy(&output).trim().to_string();
+
+        if s.trim().contains("error:") || s.trim().contains("Invalid dispatcher") {
+            anyhow::bail!("Hyprctl dispatch failed: {s}");
+        }
+
+        Ok(())
+    }
+
+    fn direction_to_hy3(direction: &Direction) -> &'static str {
+        match direction {
+            Direction::Horizontal => "h",
+            Direction::Vertical   => "v",
+            Direction::Tabbed     => "tab",
+        }
+    }
+
+    fn is_floating(addr: &str) -> Result<bool> {
+        for _ in 0..5 {
+            let clients_json                    = hyprctl(&["clients", "-j"])?;
+            let clients: Vec<serde_json::Value> = serde_json::from_slice(&clients_json)?;
+            if let Some(client) = clients.iter().find(|v| v["address"].as_str() == Some(addr) ) {
+                return Ok(client["floating"].as_bool() == Some(true));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- LayoutEngine::from_str ---------------------------------------------
+
+    #[test]
+    fn layout_engine_from_str_hy3() {
+        assert!(matches!(LayoutEngine::from_str("hy3").unwrap(), LayoutEngine::Hy3));
+    }
+
+    #[test]
+    fn layout_engine_from_str_dwindle() {
+        assert!(matches!(LayoutEngine::from_str("dwindle").unwrap(), LayoutEngine::Dwindle));
+    }
+
+    #[test]
+    fn layout_engine_from_str_unsupported() {
+        assert!(LayoutEngine::from_str("master").is_err());
+    }
+
+    #[test]
+    fn layout_engine_from_str_empty() {
+        assert!(LayoutEngine::from_str("").is_err());
+    }
+
+    // --- direction_to_hy3 ---------------------------------------------------
+
+    #[test]
+    fn direction_to_hy3_horizontal() {
+        assert_eq!(HyprlandContext::direction_to_hy3(&Direction::Horizontal), "h");
+    }
+
+    #[test]
+    fn direction_to_hy3_vertical() {
+        assert_eq!(HyprlandContext::direction_to_hy3(&Direction::Vertical), "v");
+    }
+
+    #[test]
+    fn direction_to_hy3_tabbed() {
+        assert_eq!(HyprlandContext::direction_to_hy3(&Direction::Tabbed), "tab");
+    }
+
+    // --- direction_to_dwindle_preselect --------------------------------------
+
+    #[test]
+    fn dwindle_preselect_horizontal() {
+        assert_eq!(HyprlandContext::direction_to_dwindle_preselect(&Direction::Horizontal).unwrap(), "r");
+    }
+
+    #[test]
+    fn dwindle_preselect_vertical() {
+        assert_eq!(HyprlandContext::direction_to_dwindle_preselect(&Direction::Vertical).unwrap(), "d");
+    }
+
+    #[test]
+    fn dwindle_preselect_tabbed_rejected() {
+        assert!(HyprlandContext::direction_to_dwindle_preselect(&Direction::Tabbed).is_err());
     }
 }
 

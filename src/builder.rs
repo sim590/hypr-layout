@@ -14,19 +14,19 @@ use crate::hyprland::{HyprlandContext, LayoutEngine, TABBED_SPLIT_ERROR};
 // ---------------------------------------------------------------------------
 
 pub fn build(layout: &Layout, terminal: &str, cwd: &Path, timeout: Duration) -> Result<()> {
-    let layout_engine = HyprlandContext::detect_layout_engine()?;
-    validate(layout, &layout_engine)?;
+    let ctx = HyprlandContext::detect()?;
+    validate(layout, &ctx)?;
     let first_addr = launch_first_leaf(layout, terminal, cwd, timeout)?;
-    build_recursive(layout, &first_addr, terminal, cwd, timeout, &layout_engine)
+    build_recursive(layout, &first_addr, terminal, cwd, timeout, &ctx)
 }
 
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
-fn validate(layout: &Layout, layout_engine: &LayoutEngine) -> Result<()> {
-    match (layout, layout_engine) {
+fn validate(layout: &Layout, ctx: &HyprlandContext) -> Result<()> {
+    match (layout, ctx.layout_engine) {
         (Layout::Split { direction: Direction::Tabbed, .. }, LayoutEngine::Dwindle) => anyhow::bail!(TABBED_SPLIT_ERROR),
-        (Layout::Split { children, .. }, _)                                         => children.iter().try_for_each(|(_, child)| validate(child, layout_engine)),
+        (Layout::Split { children, .. }, _)                                         => children.iter().try_for_each(|(_, child)| validate(child, ctx)),
         (Layout::Leaf { command: Some(c), .. }, _)                                  => {
             let p = parse_program_from_cmd(c)?;
             which(p).with_context(|| p.to_string())?;
@@ -165,7 +165,7 @@ fn build_recursive(
     terminal:        &str,
     cwd:             &Path,
     timeout:         Duration,
-    layout_engine:   &LayoutEngine,
+    ctx:             &HyprlandContext,
 ) -> Result<()> {
     match node {
         Layout::Split { direction, children } => {
@@ -173,10 +173,10 @@ fn build_recursive(
                 anyhow::bail!("Split node has no children");
             }
 
-            match (direction, layout_engine) {
+            match (direction, ctx.layout_engine) {
                 (Direction::Tabbed, LayoutEngine::Hy3) => {
-                    HyprlandContext::dispatch(&["hy3:changegroup", "tab"])?;
-                    HyprlandContext::focus_window(first_leaf_addr)?;
+                    ctx.hy3_change_group("tab")?;
+                    ctx.focus_window(first_leaf_addr)?;
 
                     // Pre-launch the first leaf of every remaining tab.
                     let mut child_addrs = vec![first_leaf_addr.to_string()];
@@ -187,18 +187,18 @@ fn build_recursive(
 
                     // Build the internal structure of each tab.
                     for (i, (_, child)) in children.iter().enumerate() {
-                        HyprlandContext::focus_window(&child_addrs[i])?;
-                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, layout_engine)?;
+                        ctx.focus_window(&child_addrs[i])?;
+                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, ctx)?;
                     }
 
                     Ok(())
                 }
                 (Direction::Tabbed, _) => anyhow::bail!(TABBED_SPLIT_ERROR),
                 _ => {
-                    if let LayoutEngine::Hy3 = layout_engine {
-                        HyprlandContext::dispatch(&["hy3:makegroup", HyprlandContext::direction_to_hy3(direction)])?;
+                    if let LayoutEngine::Hy3 = ctx.layout_engine {
+                        ctx.hy3_make_group(direction)?;
                     }
-                    HyprlandContext::focus_window(first_leaf_addr)?;
+                    ctx.focus_window(first_leaf_addr)?;
 
                     // Pre-launch the first leaf of every remaining child.
                     // In dwindle mode, each sibling is placed with preselect
@@ -206,9 +206,11 @@ fn build_recursive(
                     // the group always has multiple members before recursing.
                     let mut child_addrs = vec![first_leaf_addr.to_string()];
                     for (last_child_i, (_, child)) in children[1..].iter().enumerate() {
-                        if let LayoutEngine::Dwindle = layout_engine {
-                            HyprlandContext::focus_window(&child_addrs[last_child_i])?;
-                            HyprlandContext::dispatch(&["layoutmsg", "preselect", HyprlandContext::direction_to_dwindle_preselect(direction)?])?;
+                        if let LayoutEngine::Dwindle = ctx.layout_engine {
+                            let preselect_d = HyprlandContext::direction_to_dwindle_preselect(direction)?;
+
+                            ctx.focus_window(&child_addrs[last_child_i])?;
+                            ctx.layoutmsg(&format!("preselect {preselect_d}"))?;
                         }
                         let addr = launch_first_leaf(child, terminal, cwd, timeout)?;
                         child_addrs.push(addr);
@@ -216,14 +218,14 @@ fn build_recursive(
 
                     // Build the internal structure of each child.
                     for (i, (_, child)) in children.iter().enumerate() {
-                        HyprlandContext::focus_window(&child_addrs[i])?;
-                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, layout_engine)?;
+                        ctx.focus_window(&child_addrs[i])?;
+                        build_recursive(child, &child_addrs[i], terminal, cwd, timeout, ctx)?;
                     }
 
                     // Apply size ratios if at least one child specifies one.
                     let ratios: Vec<u8> = children.iter().map(|(r, _)| *r).collect();
                     if ratios.iter().any(|&r| r > 0) {
-                        apply_split_ratios(direction, &ratios, &child_addrs)?;
+                        apply_split_ratios(direction, &ratios, &child_addrs, ctx)?;
                     }
 
                     Ok(())
@@ -243,6 +245,7 @@ fn apply_split_ratios(
     direction: &Direction,
     ratios:    &[u8],
     addrs:     &[String],
+    ctx:       &HyprlandContext,
 ) -> Result<()> {
     debug_assert_eq!(ratios.len(), addrs.len());
     let n = ratios.len();
@@ -284,7 +287,7 @@ fn apply_split_ratios(
             Direction::Vertical => total_h * effective[i] / 100,
             _                   => total_h,
         };
-        HyprlandContext::resize_window_exact(&addrs[i], target_w, target_h)?;
+        ctx.resize_window_exact(&addrs[i], target_w, target_h)?;
     }
 
     Ok(())
