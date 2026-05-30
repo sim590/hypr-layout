@@ -1,99 +1,20 @@
 
-use std::str::FromStr;
 use std::path::Path;
-use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::ExitStatusExt;
 use std::time::Duration;
 use std::process::{Command, Stdio};
-use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use which::which;
 
 use crate::ast::{Direction, Layout};
-
-const TABBED_SPLIT_ERROR: &str = "Tabbed splits require the hy3 plugin to be installed and the default layout set to hy3.";
-
-// ---------------------------------------------------------------------------
-// hyprctl wrappers
-// ---------------------------------------------------------------------------
-
-fn hyprctl(args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("hyprctl")
-        .args(args)
-        .output()
-        .context("Failed to launch hyprctl")?;
-    if !output.status.success() {
-        anyhow::bail!("hyprctl failed: {}", output.status);
-    }
-    Ok(output.stdout)
-}
-
-fn dispatch(args: &[&str]) -> Result<()> {
-    let mut full_args = vec!["dispatch"];
-    full_args.extend_from_slice(args);
-    hyprctl(&full_args)?;
-    Ok(())
-}
-
-fn direction_to_hy3(direction: &Direction) -> &'static str {
-    match direction {
-        Direction::Horizontal => "h",
-        Direction::Vertical   => "v",
-        Direction::Tabbed     => "tab",
-    }
-}
-
-fn direction_to_dwindle_preselect(direction: &Direction) -> Result<&'static str> {
-    let s = match direction {
-        Direction::Horizontal => "r",
-        Direction::Vertical   => "d",
-        Direction::Tabbed     => anyhow::bail!(TABBED_SPLIT_ERROR),
-    };
-    Ok(s)
-}
-
-fn focus_window(addr: &str) -> Result<()> {
-    dispatch(&["focuswindow", &format!("address:{addr}")])
-}
-
-fn is_floating(addr: &str) -> Result<bool> {
-    for _ in 0..5 {
-        let clients_json                    = hyprctl(&["clients", "-j"])?;
-        let clients: Vec<serde_json::Value> = serde_json::from_slice(&clients_json)?;
-        if let Some(client) = clients.iter().find(|v| v["address"].as_str() == Some(addr) ) {
-            return Ok(client["floating"].as_bool() == Some(true));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Ok(false)
-}
-
-enum LayoutEngine { Hy3, Dwindle }
-impl FromStr for LayoutEngine {
-    type Err = anyhow::Error;
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
-            "hy3"     => Ok(LayoutEngine::Hy3),
-            "dwindle" => Ok(LayoutEngine::Dwindle),
-            _         => anyhow::bail!("Unsupported Layout: {input}. hypr-layout only supports hy3 and dwindle.")
-        }
-    }
-}
-
-fn detect_layout_engine() -> Result<LayoutEngine> {
-    let general_layout_json               = hyprctl(&["getoption", "general:layout", "-j"])?;
-    let general_layout: serde_json::Value = serde_json::from_slice(&general_layout_json)?;
-    LayoutEngine::from_str(general_layout["str"].as_str().unwrap_or(""))
-}
+use crate::hyprland::{HyprlandContext, LayoutEngine, TABBED_SPLIT_ERROR};
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 pub fn build(layout: &Layout, terminal: &str, cwd: &Path, timeout: Duration) -> Result<()> {
-    let layout_engine = detect_layout_engine()?;
+    let layout_engine = HyprlandContext::detect_layout_engine()?;
     validate(layout, &layout_engine)?;
     let first_addr = launch_first_leaf(layout, terminal, cwd, timeout)?;
     build_recursive(layout, &first_addr, terminal, cwd, timeout, &layout_engine)
@@ -215,79 +136,7 @@ fn launch_first_leaf(node: &Layout, terminal: &str, cwd: &Path, timeout: Duratio
                 (true,  None)    => (build_command(command, cwd, terminal).spawn()?, terminal),
                 (_,     None)    => anyhow::bail!("Leaf node has no command to execute!"),
             };
-            wait_for_window(Some(child_process), timeout, label)
-        }
-    }
-}
-
-/// Block until a new window is opened, listening on the Hyprland event socket.
-/// Returns the window address in "0xADDRESS" format.
-fn wait_for_window(mut child_process: Option<std::process::Child>, timeout: Duration, command: &str) -> Result<String> {
-    static XDG_RUNTIME: LazyLock<String> = LazyLock::new(|| {
-        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
-            let uid = std::process::Command::new("id").arg("-u").output()
-                                                                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                                                                .expect("impossible d'obtenir l'UID");
-            format!("/run/user/{uid}")
-        })
-    });
-
-    let sig            = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")?;
-    let connector_path = format!("{}/hypr/{sig}/.socket2.sock", XDG_RUNTIME.as_str());
-    let mut stream     = UnixStream::connect(&connector_path).context("Failed to connect to Hyprland socket")?;
-
-    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-
-    let mut reader = BufReader::new(&mut stream);
-    let start      = std::time::Instant::now();
-
-
-    loop {
-        let mut line = String::new();
-
-        match reader.read_line(&mut line) {
-            Ok(0) => anyhow::bail!("Hyprland socket closed unexpectedly"),
-            Ok(_) if line.starts_with("openwindow>>") => {
-                // Event format: openwindow>>ADDR,WORKSPACE,CLASS,TITLE
-                // ADDR does not carry the "0x" prefix in the event payload.
-                let addr = line.trim_start_matches("openwindow>>")
-                               .split(',')
-                               .next()
-                               .context("Failed to parse openwindow event")?
-                               .trim()
-                               .to_string();
-                let addr_str = format!("0x{addr}");
-
-                if is_floating(&addr_str)? {
-                    continue;
-                }
-
-                return Ok(addr_str);
-            },
-            Ok(_) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                   || e.kind() == std::io::ErrorKind::TimedOut => {},
-            Err(e) => return Err(e.into()),
-        }
-
-        if let Some(c) = child_process.as_mut() && let Some(status) = c.try_wait()? {
-            if let Some(sig) = status.signal() {
-                anyhow::bail!(
-                    "'{command}' was killed by signal {sig} before creating a window.\n\
-                     If it is a TUI app, perhaps make sure to use '{{{command}}}' to run it inside a terminal."
-                );
-            }
-            // Normal exit, stop monitoring, keep waiting for window
-            child_process = None;
-        }
-
-        if start.elapsed() > timeout {
-            anyhow::bail!(
-                "Timed out after {}s waiting for '{command}' to open a window.\n\
-                 Possible causes: the command crashed, it is a TUI app (try '{{{command}}}'),\n\
-                 or it is a singleton app that is already running.",
-                timeout.as_secs()
-            );
+            HyprlandContext::wait_for_window(Some(child_process), timeout, label)
         }
     }
 }
@@ -326,8 +175,8 @@ fn build_recursive(
 
             match (direction, layout_engine) {
                 (Direction::Tabbed, LayoutEngine::Hy3) => {
-                    dispatch(&["hy3:changegroup", "tab"])?;
-                    focus_window(first_leaf_addr)?;
+                    HyprlandContext::dispatch(&["hy3:changegroup", "tab"])?;
+                    HyprlandContext::focus_window(first_leaf_addr)?;
 
                     // Pre-launch the first leaf of every remaining tab.
                     let mut child_addrs = vec![first_leaf_addr.to_string()];
@@ -338,7 +187,7 @@ fn build_recursive(
 
                     // Build the internal structure of each tab.
                     for (i, (_, child)) in children.iter().enumerate() {
-                        focus_window(&child_addrs[i])?;
+                        HyprlandContext::focus_window(&child_addrs[i])?;
                         build_recursive(child, &child_addrs[i], terminal, cwd, timeout, layout_engine)?;
                     }
 
@@ -347,9 +196,9 @@ fn build_recursive(
                 (Direction::Tabbed, _) => anyhow::bail!(TABBED_SPLIT_ERROR),
                 _ => {
                     if let LayoutEngine::Hy3 = layout_engine {
-                        dispatch(&["hy3:makegroup", direction_to_hy3(direction)])?;
+                        HyprlandContext::dispatch(&["hy3:makegroup", HyprlandContext::direction_to_hy3(direction)])?;
                     }
-                    focus_window(first_leaf_addr)?;
+                    HyprlandContext::focus_window(first_leaf_addr)?;
 
                     // Pre-launch the first leaf of every remaining child.
                     // In dwindle mode, each sibling is placed with preselect
@@ -358,8 +207,8 @@ fn build_recursive(
                     let mut child_addrs = vec![first_leaf_addr.to_string()];
                     for (last_child_i, (_, child)) in children[1..].iter().enumerate() {
                         if let LayoutEngine::Dwindle = layout_engine {
-                            focus_window(&child_addrs[last_child_i])?;
-                            dispatch(&["layoutmsg", "preselect", direction_to_dwindle_preselect(direction)?])?;
+                            HyprlandContext::focus_window(&child_addrs[last_child_i])?;
+                            HyprlandContext::dispatch(&["layoutmsg", "preselect", HyprlandContext::direction_to_dwindle_preselect(direction)?])?;
                         }
                         let addr = launch_first_leaf(child, terminal, cwd, timeout)?;
                         child_addrs.push(addr);
@@ -367,7 +216,7 @@ fn build_recursive(
 
                     // Build the internal structure of each child.
                     for (i, (_, child)) in children.iter().enumerate() {
-                        focus_window(&child_addrs[i])?;
+                        HyprlandContext::focus_window(&child_addrs[i])?;
                         build_recursive(child, &child_addrs[i], terminal, cwd, timeout, layout_engine)?;
                     }
 
@@ -407,7 +256,7 @@ fn apply_split_ratios(
 
     // Snapshot all window sizes before any resize operation.
     let sizes: Vec<(u32, u32)> = addrs.iter()
-        .map(|addr| get_window_size(addr))
+        .map(|addr| HyprlandContext::get_window_size(addr))
         .collect::<Result<Vec<_>>>()?;
 
     // Compute the total extent of the group along the split axis.
@@ -435,29 +284,10 @@ fn apply_split_ratios(
             Direction::Vertical => total_h * effective[i] / 100,
             _                   => total_h,
         };
-        resize_window_exact(&addrs[i], target_w, target_h)?;
+        HyprlandContext::resize_window_exact(&addrs[i], target_w, target_h)?;
     }
 
     Ok(())
-}
-
-/// Return the current pixel size of a window looked up by its address.
-fn get_window_size(addr: &str) -> Result<(u32, u32)> {
-    let stdout  = hyprctl(&["clients", "-j"])?;
-    let clients: Vec<serde_json::Value> = serde_json::from_slice(&stdout)?;
-    for client in clients.iter() {
-        if client["address"].as_str() == Some(addr) {
-            let w = client["size"][0].as_u64().context("Missing width")? as u32;
-            let h = client["size"][1].as_u64().context("Missing height")? as u32;
-            return Ok((w, h));
-        }
-    }
-    anyhow::bail!("Window not found in clients list: {}", addr)
-}
-
-/// Resize a window to an exact pixel size.
-fn resize_window_exact(addr: &str, w: u32, h: u32) -> Result<()> {
-    dispatch(&["resizewindowpixel", &format!("exact {w} {h},address:{addr}")])
 }
 
 /// Normalize a slice of ratios: explicit (non-zero) values are kept as-is,

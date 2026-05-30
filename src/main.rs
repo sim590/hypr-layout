@@ -1,6 +1,7 @@
 
 mod ast;
 mod layout;
+mod hyprland;
 mod builder;
 
 use std::env;
