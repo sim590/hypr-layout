@@ -1,6 +1,6 @@
 [package]
 name        = "hypr-layout"
-version     = "0.1.0"
+version     = "0.2.0"
 edition     = "2024"
 description = "A CLI tool to launch and arrange tiled window layouts in Hyprland using a simple DSL"
 license     = "GPL-3.0-only"
@@ -11,7 +11,7 @@ categories  = ["command-line-utilities"]
 readme      = "README.md"
 include     = [ "src/"
               , "LICENSE"
-              , "README.md" 
+              , "README.md"
               ]
 
 [dependencies]
